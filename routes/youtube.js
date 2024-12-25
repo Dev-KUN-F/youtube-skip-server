@@ -4,7 +4,9 @@ const fs = require("fs");
 const path = require("path");
 const util = require("util");
 const { exec } = require("child_process");
-const openai = require("openai"); // openai 객체를 직접 임포트
+const axios = require("axios"); // Python 서버와 통신용
+const FormData = require("form-data"); // FormData 생성용
+const openai = require("openai"); // OpenAI API 사용
 
 const router = express.Router();
 
@@ -15,6 +17,9 @@ if (!fs.existsSync(audioDir)) fs.mkdirSync(audioDir);
 const openaiClient = new openai({
   apiKey: process.env.OPENAI_API_KEY, // 환경 변수에서 API 키 로드
 });
+
+// Python 서버 URL 설정
+const pythonServerUrl = "http://127.0.0.1:5001";
 
 router.post("/process", async (req, res) => {
   const videoUrl = req.body.videoUrl;
@@ -81,8 +86,13 @@ router.post("/process", async (req, res) => {
       console.log("Processed subtitle content:", cleanedContent);
       fs.unlinkSync(subtitlePath); // 사용 후 자막 파일 삭제
     } else {
-      console.warn("Subtitle file not detected. Directory contents:", files);
-      return res.status(200).json({ message: "Subtitles not found." });
+      console.warn("Subtitle not found, proceeding to audio transcription...");
+
+      // 자막이 없을 경우 음성 파일 추출
+      const audioPath = await extractAudio(videoId, videoUrl);
+
+      // Python 서버로 음성 파일 전송 및 Whisper 결과 수신
+      cleanedContent = await processAudioWithPython(audioPath);
     }
 
     // 긴 텍스트를 처리하기 위해 청크로 나누어 요청
@@ -93,6 +103,48 @@ router.post("/process", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// 음성 파일 추출
+async function extractAudio(videoId, videoUrl) {
+  try {
+    const audioOutputPath = path.join(audioDir, `${videoId}.mp3`);
+    const audioCommand = `yt-dlp -x --audio-format mp3 --output "${audioOutputPath}" "${videoUrl}"`;
+    console.log("Running audio extraction command:", audioCommand);
+
+    const execPromise = util.promisify(exec);
+    await execPromise(audioCommand);
+
+    console.log("Audio file extracted:", audioOutputPath);
+    return audioOutputPath;
+  } catch (error) {
+    console.error("Error extracting audio:", error.message);
+    throw new Error("Failed to extract audio from video.");
+  }
+}
+
+// Python 서버에 음성 파일 전송
+async function processAudioWithPython(audioPath) {
+  try {
+    const formData = new FormData();
+    formData.append("file", fs.createReadStream(audioPath)); // Python 서버에서 기대하는 "file" 키 사용
+
+    const response = await axios.post(
+      `${pythonServerUrl}/transcribe`,
+      formData,
+      {
+        headers: formData.getHeaders(),
+      }
+    );
+
+    console.log("Received response from Python server:", response.data);
+    return response.data.text; // Python 서버에서 반환된 텍스트
+  } catch (error) {
+    console.error("Error processing audio with Python server:", error.message);
+    throw new Error("Failed to process audio on Python server.");
+  } finally {
+    if (fs.existsSync(audioPath)) fs.unlinkSync(audioPath); // 사용 후 파일 삭제
+  }
+}
 
 // 긴 텍스트를 청크로 나누기
 function chunkText(text, chunkSize) {
@@ -128,15 +180,13 @@ async function summarizeText(text) {
       messages: [
         {
           role: "user",
-          content: `다음 텍스트를 중복된 내용은 하나로 통일,간결하게 요약하고, 대화문이 아닌 정보문형식으로  보기 쉽게 항목별로 나열해주세요. 각 항목은 주제를 간략히 설명하는 제목과 해당 내용을 포함하도록 작성해주세요.
-:\n\n${text}`,
+          content: `다음 텍스트를 한국어로 변역하고 중복된 내용은 하나로 통일, 간결하게 요약하고, 대화문이 아닌 정보문 형식으로 보기 쉽게 항목별로 나열해주세요:\n\n${text}`,
         },
       ],
       max_tokens: 1000,
       temperature: 0.5,
     });
 
-    // 응답 데이터가 존재하는지 확인
     if (
       response.choices &&
       response.choices[0] &&
