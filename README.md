@@ -57,3 +57,18 @@ Wishper 서버 시동시 5001포트로 서버 시동
 
 </details>
 
+## 기술 스택
+### Node.js 서버
+- Node.js
+- Express.js
+- axios
+- cors
+- openai
+- multer
+
+### Whisper 서버 
+
+- Python
+- Flask
+- Whisper
+
